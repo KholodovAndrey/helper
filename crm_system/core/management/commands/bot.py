@@ -3,7 +3,10 @@ import datetime
 import logging
 from enum import Enum
 from django.core.management.base import BaseCommand
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import (
+    Update, ReplyKeyboardMarkup, ReplyKeyboardRemove,
+    InlineKeyboardButton, InlineKeyboardMarkup
+)
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -11,7 +14,8 @@ from telegram.ext import (
     ContextTypes,
     filters,
     ConversationHandler,
-    CallbackContext
+    CallbackContext,
+    CallbackQueryHandler
 )
 from core.models import Client, Order, Expense
 from asgiref.sync import sync_to_async
@@ -38,10 +42,8 @@ class State(Enum):
     AWAITING_ORDER_CLIENT = 8
     AWAITING_ORDER_COST = 9
     AWAITING_ORDER_DEADLINE = 10
-    AWAITING_INCOME_ORDER = 11
-    AWAITING_EXPENSE_COMMENT = 12
-    AWAITING_EXPENSE_COST = 13
-    AWAITING_COMPLETE_ORDER = 14
+    AWAITING_EXPENSE_COMMENT = 11
+    AWAITING_EXPENSE_COST = 12
 
 # Тексты кнопок для избежания "магических строк"
 class ButtonText:
@@ -71,6 +73,10 @@ class Command(BaseCommand):
             return
         
         application = Application.builder().token(TOKEN).build()
+        
+        # Добавляем обработчики для инлайн-кнопок ПЕРВЫМИ
+        application.add_handler(CallbackQueryHandler(self.income_button_handler, pattern="^income_"))
+        application.add_handler(CallbackQueryHandler(self.complete_order_button_handler, pattern="^complete_"))
         
         # Conversation Handler для пошагового ввода
         conv_handler = ConversationHandler(
@@ -112,17 +118,11 @@ class Command(BaseCommand):
                 State.AWAITING_ORDER_DEADLINE.value: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_order_deadline)
                 ],
-                State.AWAITING_INCOME_ORDER.value: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.process_income)
-                ],
                 State.AWAITING_EXPENSE_COMMENT.value: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_expense_comment)
                 ],
                 State.AWAITING_EXPENSE_COST.value: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_expense_cost)
-                ],
-                State.AWAITING_COMPLETE_ORDER.value: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.process_complete_order)
                 ],
             },
             fallbacks=[CommandHandler("cancel", self.cancel)],
@@ -227,7 +227,8 @@ class Command(BaseCommand):
             await self.show_archived_orders(update, context)
             return State.ORDERS_MENU.value
         elif text == ButtonText.COMPLETE_ORDER:
-            return await self.ask_order_id_to_complete(update, context)
+            await self.show_orders_to_complete(update, context)
+            return State.ORDERS_MENU.value
         elif text == ButtonText.BACK:
             await self.show_main_menu(update, context)
             return State.MAIN_MENU.value
@@ -241,7 +242,8 @@ class Command(BaseCommand):
         text = update.message.text
         
         if text == ButtonText.ADD_INCOME:
-            return await self.add_income(update, context)
+            await self.show_orders_for_income(update, context)
+            return State.OPERATIONS_MENU.value
         elif text == ButtonText.ADD_EXPENSE:
             await update.message.reply_text(
                 "Введите комментарий к расходу:",
@@ -561,51 +563,48 @@ class Command(BaseCommand):
             reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         )
         return State.AWAITING_ORDER_CLIENT.value
-    
-    async def ask_order_id_to_complete(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Запрос ID сделки для завершения"""
+
+    async def show_orders_to_complete(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показать оплаченные сделки для завершения с инлайн-кнопками"""
         paid_orders = await self.get_paid_orders()
     
         if not paid_orders:
             await update.message.reply_text("❌ Нет оплаченных сделок для завершения.")
-            await self.show_orders_menu(update, context)
-            return State.ORDERS_MENU.value
-    
-        response = "✅ Оплаченные сделки (готовые к завершению):\n\n"
+            return
+        
+        keyboard = []
         for order in paid_orders:
-            response += f"ID: {order.id} - {order.name} ({order.client.name}) - {order.cost} руб\n"
-    
-        response += "\nВведите ID сделки для завершения:"
-    
-        await update.message.reply_text(response)
-        return State.AWAITING_COMPLETE_ORDER.value
+            button_text = f"{order.name} ({order.client.name}) - {order.cost} руб"
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"complete_{order.id}")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "✅ Выберите сделку для завершения:",
+            reply_markup=reply_markup
+        )
 
-    async def process_complete_order(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка завершения сделки"""
-        if update.message.text == ButtonText.BACK:
-            await self.show_orders_menu(update, context)
-            return State.ORDERS_MENU.value
+    async def complete_order_button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик нажатия на инлайн-кнопку завершения сделки"""
+        query = update.callback_query
+        await query.answer()
+        
+        order_id = int(query.data.split('_')[1])
+        success, order = await self.update_order_status(order_id, 'completed')
     
-        try:
-            order_id = int(update.message.text)
-            success, order = await self.update_order_status(order_id, 'completed')
-    
-            if success:
-                # Используем sync_to_async для доступа к связанным полям
-                order_name = await sync_to_async(lambda: order.name)()
-                client_name = await sync_to_async(lambda: order.client.name)()
+        if success:
+            # Используем sync_to_async для доступа к связанным полям
+            order_name = await sync_to_async(lambda: order.name)()
+            client_name = await sync_to_async(lambda: order.client.name)()
             
-                await update.message.reply_text(
-                    f"✅ Сделка '{order_name}' ({client_name}) успешно завершена и перемещена в архив."
-                )
-            else:
-                await update.message.reply_text("❌ Неверный ID сделки или сделка уже завершена.")
+            await query.edit_message_text(
+                f"✅ Сделка '{order_name}' ({client_name}) успешно завершена и перемещена в архив."
+            )
+        else:
+            await query.edit_message_text("❌ Ошибка при завершении сделки.")
     
-            await self.show_orders_menu(update, context)
-            return State.ORDERS_MENU.value
-        except ValueError:
-            await update.message.reply_text("❌ Неверный формат ID. Введите число:")
-            return State.AWAITING_COMPLETE_ORDER.value
+        # Показываем меню заказов после завершения
+        await self.show_orders_menu_from_callback(update, context)
 
     async def get_order_client(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Получение клиента для сделки"""
@@ -682,7 +681,7 @@ class Command(BaseCommand):
             await self.show_orders_menu(update, context)
             return State.ORDERS_MENU.value
         except ValueError:
-            await update.message.reply_text("❌ Неверный формат даты. Используйте ДД.ММ.ГГГГ:")
+            await update.message.reply_text("❌ Неверный формат дата. Используйте ДД.ММ.ГГГГ:")
             return State.AWAITING_ORDER_DEADLINE.value
 
     async def show_active_orders(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -750,50 +749,47 @@ class Command(BaseCommand):
         await self.show_orders_menu(update, context)
 
     # ===== ОПЕРАЦИИ =====
-    async def add_income(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Добавление дохода"""
+    async def show_orders_for_income(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показать неоплаченные сделки для добавления дохода с инлайн-кнопками"""
         unpaid_orders = await self.get_unpaid_orders()
     
         if not unpaid_orders:
             await update.message.reply_text("❌ Нет неоплаченных сделок.")
-            await self.show_operations_menu(update, context)
-            return State.OPERATIONS_MENU.value
+            return
     
-        response = "💳 Неоплаченные сделки:\n\n"
+        keyboard = []
         for order in unpaid_orders:
-            response += f"ID: {order.id} - {order.name} ({order.client.name}) - {order.cost} руб\n"
-    
-        response += "\nВведите ID сделки для учета оплаты:"
-    
-        await update.message.reply_text(response)
-        return State.AWAITING_INCOME_ORDER.value
+            button_text = f"{order.name} ({order.client.name}) - {order.cost} руб"
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"income_{order.id}")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "💳 Выберите сделку для учета оплаты:",
+            reply_markup=reply_markup
+        )
 
-    async def process_income(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка дохода"""
-        if update.message.text == ButtonText.BACK:
-            await self.show_operations_menu(update, context)
-            return State.OPERATIONS_MENU.value
+    async def income_button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик нажатия на инлайн-кнопку добавления дохода"""
+        query = update.callback_query
+        await query.answer()
         
-        try:
-            order_id = int(update.message.text)
-            success, order = await self.update_order_status(order_id, 'paid')
-        
-            if success:
-                # Используем sync_to_async для доступа к связанным полям
-                order_name = await sync_to_async(lambda: order.name)()
-                client_name = await sync_to_async(lambda: order.client.name)()
-                
-                await update.message.reply_text(
-                    f"✅ Оплата учтена! Сделка '{order_name}' ({client_name}) перемещена в оплаченные."
-                )
-            else:
-                await update.message.reply_text("❌ Неверный ID сделки или сделка уже оплачена.")
-        
-            await self.show_operations_menu(update, context)
-            return State.OPERATIONS_MENU.value
-        except ValueError:
-            await update.message.reply_text("❌ Неверный формат ID. Введите число:")
-            return State.AWAITING_INCOME_ORDER.value
+        order_id = int(query.data.split('_')[1])
+        success, order = await self.update_order_status(order_id, 'paid')
+    
+        if success:
+            # Используем sync_to_async для доступа к связанным полям
+            order_name = await sync_to_async(lambda: order.name)()
+            client_name = await sync_to_async(lambda: order.client.name)()
+            
+            await query.edit_message_text(
+                f"✅ Оплата учтена! Сделка '{order_name}' ({client_name}) перемещена в оплаченные."
+            )
+        else:
+            await query.edit_message_text("❌ Ошибка при учете оплаты.")
+    
+        # Показываем меню операций после добавления дохода
+        await self.show_operations_menu_from_callback(update, context)
 
     async def get_expense_comment(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Получение комментария расхода"""
@@ -875,6 +871,16 @@ class Command(BaseCommand):
             else:
                 await update.message.reply_text(response)
         
+        await self.show_operations_menu(update, context)
+
+    async def show_orders_menu_from_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показать меню сделок после обработки callback"""
+        query = update.callback_query
+        await self.show_orders_menu(update, context)
+
+    async def show_operations_menu_from_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показать меню операций после обработки callback"""
+        query = update.callback_query
         await self.show_operations_menu(update, context)
 
     # ===== СТАТИСТИКА =====
