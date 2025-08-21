@@ -14,27 +14,21 @@ from core.models import Client, Order, Expense
 from asgiref.sync import sync_to_async
 
 # Состояния для ConversationHandler
-(
-    # Клиенты
-    AWAITING_CLIENT_NAME,
-    AWAITING_CLIENT_CONTACTS,
-    AWAITING_CLIENT_NOTES,
-    
-    # Сделки
-    AWAITING_ORDER_NAME,
-    AWAITING_ORDER_CLIENT,
-    AWAITING_ORDER_COST,
-    AWAITING_ORDER_DEADLINE,
-    
-    # Операции
-    AWAITING_INCOME_ORDER,
-    AWAITING_EXPENSE_COMMENT,
-    AWAITING_EXPENSE_COST,
-    
-    # Дополнительные
-    AWAITING_PAYMENT_ORDER,
-    AWAITING_COMPLETION_ORDER
-) = range(13)
+class States:
+    MAIN_MENU = 0
+    CLIENTS_MENU = 1
+    ORDERS_MENU = 2
+    OPERATIONS_MENU = 3
+    AWAITING_CLIENT_NAME = 4
+    AWAITING_CLIENT_CONTACTS = 5
+    AWAITING_CLIENT_NOTES = 6
+    AWAITING_ORDER_NAME = 7
+    AWAITING_ORDER_CLIENT = 8
+    AWAITING_ORDER_COST = 9
+    AWAITING_ORDER_DEADLINE = 10
+    AWAITING_INCOME_ORDER = 11
+    AWAITING_EXPENSE_COMMENT = 12
+    AWAITING_EXPENSE_COST = 13
 
 class Command(BaseCommand):
     help = 'Запуск телеграм-бота CRM системы'
@@ -50,61 +44,88 @@ class Command(BaseCommand):
         # Conversation Handler для пошагового ввода
         conv_handler = ConversationHandler(
             entry_points=[
+                CommandHandler("start", self.start),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_main_menu)
             ],
             states={
-                # Клиенты
-                AWAITING_CLIENT_NAME: [
+                States.MAIN_MENU: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_main_menu)
+                ],
+                States.CLIENTS_MENU: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_clients_menu)
+                ],
+                States.ORDERS_MENU: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_orders_menu)
+                ],
+                States.OPERATIONS_MENU: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_operations_menu)
+                ],
+                States.AWAITING_CLIENT_NAME: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_client_name)
                 ],
-                AWAITING_CLIENT_CONTACTS: [
+                States.AWAITING_CLIENT_CONTACTS: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_client_contacts)
                 ],
-                AWAITING_CLIENT_NOTES: [
+                States.AWAITING_CLIENT_NOTES: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_client_notes)
                 ],
-                
-                # Сделки
-                AWAITING_ORDER_NAME: [
+                States.AWAITING_ORDER_NAME: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_order_name)
                 ],
-                AWAITING_ORDER_CLIENT: [
+                States.AWAITING_ORDER_CLIENT: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_order_client)
                 ],
-                AWAITING_ORDER_COST: [
+                States.AWAITING_ORDER_COST: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_order_cost)
                 ],
-                AWAITING_ORDER_DEADLINE: [
+                States.AWAITING_ORDER_DEADLINE: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_order_deadline)
                 ],
-                
-                # Операции
-                AWAITING_INCOME_ORDER: [
+                States.AWAITING_INCOME_ORDER: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.process_income)
                 ],
-                AWAITING_EXPENSE_COMMENT: [
+                States.AWAITING_EXPENSE_COMMENT: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_expense_comment)
                 ],
-                AWAITING_EXPENSE_COST: [
+                States.AWAITING_EXPENSE_COST: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.get_expense_cost)
                 ],
-                
-                # Дополнительные
-                AWAITING_PAYMENT_ORDER: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.process_payment)
-                ],
-                AWAITING_COMPLETION_ORDER: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.process_completion)
-                ],
             },
-            fallbacks=[MessageHandler(filters.Regex('^🔙 Назад$'), self.back_to_main)],
+            fallbacks=[CommandHandler("cancel", self.cancel)],
+            map_to_parent={
+                ConversationHandler.END: States.MAIN_MENU,
+            }
         )
         
         application.add_handler(conv_handler)
-        application.add_handler(CommandHandler("start", self.start))
         
         self.stdout.write(self.style.SUCCESS('Бот запущен...'))
         application.run_polling()
+
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Запуск бота"""
+        await update.message.reply_text(
+            "🚀 Добро пожаловать в CRM систему!\n\n"
+            "Доступные разделы:\n"
+            "👥 Клиенты - управление клиентами\n"
+            "📋 Сделки - работа с заказами\n"
+            "💼 Операции - финансовые операции\n"
+            "📊 Статистика - отчеты и аналитика"
+        )
+        
+        await self.show_main_menu(update, context)
+        return States.MAIN_MENU
+
+    async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Отмена текущей операции"""
+        await update.message.reply_text(
+            "Операция отменена.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        context.user_data.clear()
+        
+        await self.show_main_menu(update, context)
+        return States.MAIN_MENU
 
     async def handle_main_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка главного меню"""
@@ -112,18 +133,19 @@ class Command(BaseCommand):
         
         if text == '👥 Клиенты':
             await self.show_clients_menu(update, context)
+            return States.CLIENTS_MENU
         elif text == '📋 Сделки':
             await self.show_orders_menu(update, context)
+            return States.ORDERS_MENU
         elif text == '💼 Операции':
             await self.show_operations_menu(update, context)
+            return States.OPERATIONS_MENU
         elif text == '📊 Статистика':
             await self.show_stats(update, context)
-        elif text == '🔙 Назад':
-            await self.show_main_menu(update, context)
+            return States.MAIN_MENU
         else:
             await self.show_main_menu(update, context)
-        
-        return ConversationHandler.END
+            return States.MAIN_MENU
 
     async def handle_clients_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка меню клиентов"""
@@ -134,13 +156,16 @@ class Command(BaseCommand):
                 "Введите имя клиента:",
                 reply_markup=ReplyKeyboardRemove()
             )
-            return AWAITING_CLIENT_NAME
+            return States.AWAITING_CLIENT_NAME
         elif text == '📋 Список клиентов':
             await self.list_clients(update, context)
+            return States.CLIENTS_MENU
         elif text == '🔙 Назад':
             await self.show_main_menu(update, context)
-        
-        return ConversationHandler.END
+            return States.MAIN_MENU
+        else:
+            await self.show_clients_menu(update, context)
+            return States.CLIENTS_MENU
 
     async def handle_orders_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка меню сделок"""
@@ -151,15 +176,19 @@ class Command(BaseCommand):
                 "Введите наименование сделки:",
                 reply_markup=ReplyKeyboardRemove()
             )
-            return AWAITING_ORDER_NAME
+            return States.AWAITING_ORDER_NAME
         elif text == '📈 Активные сделки':
             await self.show_active_orders(update, context)
+            return States.ORDERS_MENU
         elif text == '📁 Архив сделок':
             await self.show_archived_orders(update, context)
+            return States.ORDERS_MENU
         elif text == '🔙 Назад':
             await self.show_main_menu(update, context)
-        
-        return ConversationHandler.END
+            return States.MAIN_MENU
+        else:
+            await self.show_orders_menu(update, context)
+            return States.ORDERS_MENU
 
     async def handle_operations_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка меню операций"""
@@ -167,24 +196,22 @@ class Command(BaseCommand):
         
         if text == '💰 Добавить доход':
             await self.add_income(update, context)
-            return AWAITING_INCOME_ORDER
+            return States.AWAITING_INCOME_ORDER
         elif text == '💸 Добавить расход':
             await update.message.reply_text(
                 "Введите комментарий к расходу:",
                 reply_markup=ReplyKeyboardRemove()
             )
-            return AWAITING_EXPENSE_COMMENT
+            return States.AWAITING_EXPENSE_COMMENT
         elif text == '📋 История операций':
             await self.show_operations_history(update, context)
+            return States.OPERATIONS_MENU
         elif text == '🔙 Назад':
             await self.show_main_menu(update, context)
-        
-        return ConversationHandler.END
-
-    async def back_to_main(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Возврат в главное меню"""
-        await self.show_main_menu(update, context)
-        return ConversationHandler.END
+            return States.MAIN_MENU
+        else:
+            await self.show_operations_menu(update, context)
+            return States.OPERATIONS_MENU
 
     # ===== ОСНОВНЫЕ МЕНЮ =====
     async def show_main_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -331,47 +358,32 @@ class Command(BaseCommand):
         
         return total_income, total_expense, month_income, month_expense
 
-    # ===== КОМАНДА START =====
-    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Запуск бота"""
-        await update.message.reply_text(
-            "🚀 Добро пожаловать в CRM систему!\n\n"
-            "Доступные разделы:\n"
-            "👥 Клиенты - управление клиентами\n"
-            "📋 Сделки - работа с заказами\n"
-            "💼 Операции - финансовые операции\n"
-            "📊 Статистика - отчеты и аналитика"
-        )
-        
-        await self.show_main_menu(update, context)
-        return ConversationHandler.END
-
     # ===== РАБОТА С КЛИЕНТАМИ =====
     async def get_client_name(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Получение имени клиента"""
         if update.message.text == '🔙 Назад':
             await self.show_clients_menu(update, context)
-            return ConversationHandler.END
+            return States.CLIENTS_MENU
             
         context.user_data['client_name'] = update.message.text
         await update.message.reply_text("Введите контакты клиента:")
-        return AWAITING_CLIENT_CONTACTS
+        return States.AWAITING_CLIENT_CONTACTS
 
     async def get_client_contacts(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Получение контактов клиента"""
         if update.message.text == '🔙 Назад':
             await self.show_clients_menu(update, context)
-            return ConversationHandler.END
+            return States.CLIENTS_MENU
             
         context.user_data['client_contacts'] = update.message.text
         await update.message.reply_text("Введите примечание (или 'пропустить' чтобы пропустить):")
-        return AWAITING_CLIENT_NOTES
+        return States.AWAITING_CLIENT_NOTES
 
     async def get_client_notes(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Получение примечания клиента"""
         if update.message.text == '🔙 Назад':
             await self.show_clients_menu(update, context)
-            return ConversationHandler.END
+            return States.CLIENTS_MENU
             
         if update.message.text.lower() != 'пропустить':
             context.user_data['client_notes'] = update.message.text
@@ -388,7 +400,7 @@ class Command(BaseCommand):
         context.user_data.clear()
         
         await self.show_clients_menu(update, context)
-        return ConversationHandler.END
+        return States.CLIENTS_MENU
 
     async def list_clients(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Список всех клиентов"""
@@ -412,7 +424,7 @@ class Command(BaseCommand):
         """Получение названия сделки"""
         if update.message.text == '🔙 Назад':
             await self.show_orders_menu(update, context)
-            return ConversationHandler.END
+            return States.ORDERS_MENU
             
         context.user_data['order_name'] = update.message.text
         
@@ -420,7 +432,7 @@ class Command(BaseCommand):
         if not clients:
             await update.message.reply_text("❌ Нет клиентов. Сначала добавьте клиента.")
             await self.show_orders_menu(update, context)
-            return ConversationHandler.END
+            return States.ORDERS_MENU
         
         keyboard = [[client.name] for client in clients]
         keyboard.append(['🔙 Назад'])
@@ -429,13 +441,13 @@ class Command(BaseCommand):
             "Выберите клиента из списка:",
             reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         )
-        return AWAITING_ORDER_CLIENT
+        return States.AWAITING_ORDER_CLIENT
 
     async def get_order_client(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Получение клиента для сделки"""
         if update.message.text == '🔙 Назад':
             await self.show_orders_menu(update, context)
-            return ConversationHandler.END
+            return States.ORDERS_MENU
             
         client = await self.get_client_by_name(update.message.text)
         
@@ -445,16 +457,16 @@ class Command(BaseCommand):
                 "Введите стоимость сделки (только число):",
                 reply_markup=ReplyKeyboardRemove()
             )
-            return AWAITING_ORDER_COST
+            return States.AWAITING_ORDER_COST
         else:
             await update.message.reply_text("❌ Клиент не найден. Попробуйте еще раз:")
-            return AWAITING_ORDER_CLIENT
+            return States.AWAITING_ORDER_CLIENT
 
     async def get_order_cost(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Получение стоимости сделки"""
         if update.message.text == '🔙 Назад':
             await self.show_orders_menu(update, context)
-            return ConversationHandler.END
+            return States.ORDERS_MENU
             
         try:
             cost = float(update.message.text)
@@ -475,16 +487,16 @@ class Command(BaseCommand):
                 "Выберите дату исполнения или введите свою (ДД.ММ.ГГГГ):",
                 reply_markup=ReplyKeyboardMarkup(dates_keyboard, resize_keyboard=True)
             )
-            return AWAITING_ORDER_DEADLINE
+            return States.AWAITING_ORDER_DEADLINE
         except ValueError:
             await update.message.reply_text("❌ Неверный формат стоимости. Введите число:")
-            return AWAITING_ORDER_COST
+            return States.AWAITING_ORDER_COST
 
     async def get_order_deadline(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Получение дедлайна сделки"""
         if update.message.text == '🔙 Назад':
             await self.show_orders_menu(update, context)
-            return ConversationHandler.END
+            return States.ORDERS_MENU
             
         try:
             deadline = datetime.datetime.strptime(update.message.text, '%d.%m.%Y').date()
@@ -500,10 +512,10 @@ class Command(BaseCommand):
             context.user_data.clear()
             
             await self.show_orders_menu(update, context)
-            return ConversationHandler.END
+            return States.ORDERS_MENU
         except ValueError:
             await update.message.reply_text("❌ Неверный формат даты. Используйте ДД.ММ.ГГГГ:")
-            return AWAITING_ORDER_DEADLINE
+            return States.AWAITING_ORDER_DEADLINE
 
     async def show_active_orders(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Показать активные сделки"""
@@ -562,7 +574,7 @@ class Command(BaseCommand):
         if not unpaid_orders:
             await update.message.reply_text("❌ Нет неоплаченных сделок.")
             await self.show_operations_menu(update, context)
-            return ConversationHandler.END
+            return States.OPERATIONS_MENU
         
         response = "💳 Неоплаченные сделки:\n\n"
         for order in unpaid_orders:
@@ -571,13 +583,13 @@ class Command(BaseCommand):
         response += "\nВведите ID сделки для учета оплаты:"
         
         await update.message.reply_text(response)
-        return AWAITING_INCOME_ORDER
+        return States.AWAITING_INCOME_ORDER
 
     async def process_income(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка дохода"""
         if update.message.text == '🔙 Назад':
             await self.show_operations_menu(update, context)
-            return ConversationHandler.END
+            return States.OPERATIONS_MENU
             
         try:
             order_id = int(update.message.text)
@@ -589,26 +601,26 @@ class Command(BaseCommand):
                 await update.message.reply_text("❌ Неверный ID сделки или сделка уже оплачена.")
             
             await self.show_operations_menu(update, context)
-            return ConversationHandler.END
+            return States.OPERATIONS_MENU
         except ValueError:
             await update.message.reply_text("❌ Неверный формат ID. Введите число:")
-            return AWAITING_INCOME_ORDER
+            return States.AWAITING_INCOME_ORDER
 
     async def get_expense_comment(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Получение комментария расхода"""
         if update.message.text == '🔙 Назад':
             await self.show_operations_menu(update, context)
-            return ConversationHandler.END
+            return States.OPERATIONS_MENU
             
         context.user_data['expense_comment'] = update.message.text
         await update.message.reply_text("Введите сумму расхода (только число):")
-        return AWAITING_EXPENSE_COST
+        return States.AWAITING_EXPENSE_COST
 
     async def get_expense_cost(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Получение суммы расхода"""
         if update.message.text == '🔙 Назад':
             await self.show_operations_menu(update, context)
-            return ConversationHandler.END
+            return States.OPERATIONS_MENU
             
         try:
             cost = float(update.message.text)
@@ -622,10 +634,10 @@ class Command(BaseCommand):
             context.user_data.clear()
             
             await self.show_operations_menu(update, context)
-            return ConversationHandler.END
+            return States.OPERATIONS_MENU
         except ValueError:
             await update.message.reply_text("❌ Неверный формат суммы. Введите число:")
-            return AWAITING_EXPENSE_COST
+            return States.AWAITING_EXPENSE_COST
 
     async def show_operations_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """История операций"""
